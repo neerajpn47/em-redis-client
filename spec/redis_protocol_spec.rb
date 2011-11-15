@@ -22,16 +22,31 @@ module EM::P::Redis
   end
 
   def receive_data(reply)
-    reply_type = reply[0]
-    reply_args = reply[1..-3]
-    response = case reply_type
-               when PLUS, MINUS then reply_args
-               when COLON       then reply_args.to_i
-               end
-    @request_cb.call(response)
+    (@buffer ||= "") << reply
+    if index = @buffer.index(DELIMITER)
+      line = @buffer.slice(0, index + DELIMITER.size)
+      @request_cb.call process_reply(line)
+    end
   end
   
   private
+
+  def process_reply(line)
+    reply_type = line[0]
+    reply_args = line[1..-3]
+    process(reply_type, reply_args)
+  end
+
+  def process(type, args)
+    case type
+    when PLUS, MINUS then args
+    when COLON       then args.to_i
+    when DOLLAR      then
+      data_len = Integer(args)
+      nil if -1 == data_len
+    else type + args
+    end
+  end
 
   def format_as_multi_bulk_reply(line)
     words = line.split
@@ -55,13 +70,6 @@ module EM::P::Redis
       DELIMITER
   end
 end
-
-EM.run {
-  redis = EM::P::Redis.connect
-  redis.send_request("foobar") { |r| p r }
-  EM.stop
-}
-
 
 class TestConnection
   include EM::P::Redis
@@ -108,9 +116,24 @@ describe EM::P::Redis do
         end
         @c.receive_data ":5\r\n"
       end
+
+      describe "when network output is buffered" do
+        it "should return the correct single line response" do
+          @c.send_request("PING") do |r|
+            r.should == "PONG"
+          end
+          "+PONG\r\n".each_byte { |byte| @c.receive_data(byte) }
+        end
+      end
     end
 
     describe "bulk replies" do
+      it "should return nil when the value does not exist" do
+        @c.send_request("GET nonexistingkey") do |r|
+          r.should be_nil
+        end
+        @c.receive_data "$-1\r\n"
+      end
     end
   end
 
