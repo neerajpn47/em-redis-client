@@ -26,10 +26,10 @@ module EM::P::Redis
     (@buffer ||= "") << reply
     while index = @buffer.index(DELIMITER)
       line = @buffer.slice!(0, index + DELIMITER.size)
-      if @bulk_type
+      if @bulk
         type = BULK
         args = line[0..-3]
-        @bulk_type = false
+        @bulk = false
       else
         type = line[0]
         args = line[1..-3]
@@ -40,18 +40,42 @@ module EM::P::Redis
                  when DOLLAR      then
                    data_length = Integer(args)
                    if -1 == data_length
-                     nil
+                     if @multi_bulk
+                       @multi_values << nil
+                       if @multi_values.size == @multi_argc
+                         @multi_values
+                       else
+                         next
+                       end
+                     else
+                       nil
+                     end
                    else
-                     @bulk_type = true
+                     @bulk = true
                      next
                    end
-                 when BULK        then args
+                 when BULK        then
+                   if @multi_bulk
+                     @multi_values << args
+                     if @multi_values.size == @multi_argc
+                       @multi_values
+                     else
+                       next
+                     end
+                   else
+                     args
+                   end
                  when ASTERISK    then
                    argc = Integer(args)
                    if 0 == argc
                      []
                    elsif -1 == argc
                      nil
+                   else
+                     @multi_bulk   = true
+                     @multi_values = []
+                     @multi_argc   = argc
+                     next
                    end
                  else
                    type + args
@@ -59,7 +83,7 @@ module EM::P::Redis
       @callback.call(response)
     end
   end
-  
+
   private
 
   def format_as_multi_bulk_reply(line)
@@ -179,6 +203,20 @@ describe EM::P::Redis do
           r.should be_nil
         end
         @c.receive_data "*-1\r\n"
+      end
+
+      it "should return multiple values" do
+        @c.send_request("LRANGE mylist 0 3") do |r|
+          r.should == ["foo", "bar", "Hello", "World"]
+        end
+        @c.receive_data "*4\r\n$3\r\nfoo\r\n$3\r\nbar\r\n$5\r\nHello\r\n$5\r\nWorld\r\n"
+      end
+
+      it "should properly handle presence of nil values" do
+        @c.send_request("GET mysortedlist") do |r|
+          r.should == ["foo", nil, "bar"]
+        end
+        @c.receive_data "*3\r\n$3\r\nfoo\r\n$-1\r\n$3\r\nbar\r\n"
       end
     end
   end
