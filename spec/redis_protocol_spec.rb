@@ -26,65 +26,89 @@ module EM::P::Redis
     (@buffer ||= "") << reply
     while index = @buffer.index(DELIMITER)
       line = @buffer.slice!(0, index + DELIMITER.size)
-      if @bulk
-        type = BULK
-        args = line[0..-3]
-        @bulk = false
+      type, args = reply_type_and_args(line)
+      response = send("type_#{handler_method_name(type)}", args)
+      if response_incomplete?
+        next
       else
-        type = line[0]
-        args = line[1..-3]
+        dispatch_response(response)
       end
-      response = case type
-                 when PLUS, MINUS then args
-                 when COLON       then args.to_i
-                 when DOLLAR      then
-                   data_length = Integer(args)
-                   if -1 == data_length
-                     if @multi_bulk
-                       @multi_values << nil
-                       if @multi_values.size == @multi_argc
-                         @multi_values
-                       else
-                         next
-                       end
-                     else
-                       nil
-                     end
-                   else
-                     @bulk = true
-                     next
-                   end
-                 when BULK        then
-                   if @multi_bulk
-                     @multi_values << args
-                     if @multi_values.size == @multi_argc
-                       @multi_values
-                     else
-                       next
-                     end
-                   else
-                     args
-                   end
-                 when ASTERISK    then
-                   argc = Integer(args)
-                   if 0 == argc
-                     []
-                   elsif -1 == argc
-                     nil
-                   else
-                     @multi_bulk   = true
-                     @multi_values = []
-                     @multi_argc   = argc
-                     next
-                   end
-                 else
-                   type + args
-                 end
-      @callback.call(response)
     end
   end
 
   private
+
+  def response_incomplete?
+    bulk? or multi_bulk?
+  end
+
+  def bulk?
+    @bulk
+  end
+
+  def multi_bulk?
+    @multi_bulk and @multi_values.size < @multi_argc
+  end
+
+  def dispatch_response(response)
+    @multi_bulk = false
+    @callback.call(response)
+  end
+
+  def type_minus(args)
+    args
+  end
+
+  def type_plus(args)
+    args
+  end
+
+  def type_colon(args)
+    args.to_i
+  end
+
+  def type_dollar(args)
+    data_length = Integer(args)
+    if -1 == data_length
+      @multi_bulk ? (@multi_values << nil) : nil
+    else
+      @bulk = true
+    end
+  end
+
+  def type_bulk(args)
+    @multi_bulk ? (@multi_values << args) : args
+  end
+
+  def type_asterisk(args)
+    argc = Integer(args)
+    case argc
+    when 0  then []
+    when -1 then nil
+    else initialize_multi_bulk(argc)
+    end
+  end
+
+  def handler_method_name(type)
+    self.class.constants.select do |const|
+      self.class.const_get(const) == type
+    end.reduce.to_s.downcase
+  end
+
+  def reply_type_and_args(line)
+    if @bulk
+      @bulk = false
+      [BULK, line[0..-3]]
+    else
+      [line[0], line[1..-3]]
+    end
+  end
+
+  def initialize_multi_bulk(argc)
+    @multi_bulk   = true
+    @multi_values = []
+    @multi_argc   = argc
+  end
 
   def format_as_multi_bulk_reply(line)
     words = line.split
