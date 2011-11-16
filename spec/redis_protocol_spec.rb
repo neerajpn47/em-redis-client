@@ -18,7 +18,7 @@ module EM::P::Redis
   end
 
   def send_request(line, &blk)
-    @request_cb = blk
+    @callback = blk
     send_data format_as_multi_bulk_reply(line)
   end
 
@@ -26,27 +26,37 @@ module EM::P::Redis
     (@buffer ||= "") << reply
     while index = @buffer.index(DELIMITER)
       line = @buffer.slice!(0, index + DELIMITER.size)
-      if DOLLAR == @prev_type
+      if @bulk_type
         type = BULK
         args = line[0..-3]
+        @bulk_type = false
       else
         type = line[0]
         args = line[1..-3]
       end
-      case type
-      when PLUS, MINUS then 
-        @request_cb.call(args)
-      when COLON       then
-        @request_cb.call(args.to_i)
-      when DOLLAR      then
-        data_length = Integer(args)
-        if -1 == data_length
-          @request_cb.call(nil)
-        end
-      when BULK        then
-        @request_cb.call(args)
-      end
-      @prev_type = type
+      response = case type
+                 when PLUS, MINUS then args
+                 when COLON       then args.to_i
+                 when DOLLAR      then
+                   data_length = Integer(args)
+                   if -1 == data_length
+                     nil
+                   else
+                     @bulk_type = true
+                     next
+                   end
+                 when BULK        then args
+                 when ASTERISK    then
+                   argc = Integer(args)
+                   if 0 == argc
+                     []
+                   elsif -1 == argc
+                     nil
+                   end
+                 else
+                   type + args
+                 end
+      @callback.call(response)
     end
   end
   
@@ -153,6 +163,22 @@ describe EM::P::Redis do
           end
           "$6\r\nfoobar\r\n".each_byte { |byte| @c.receive_data(byte) }
         end
+      end
+    end
+
+    describe "multiple bulk replies" do
+      it "should return an empty list when the key does not exist" do
+        @c.send_request("LRANGE nokey 0 1") do |r|
+          r.should be_empty
+        end
+        @c.receive_data "*0\r\n"
+      end
+
+      it "should return nil when an error occurs" do
+        @c.send_request("BLPOP key 1") do |r|
+          r.should be_nil
+        end
+        @c.receive_data "*-1\r\n"
       end
     end
   end
