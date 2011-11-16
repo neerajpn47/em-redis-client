@@ -218,6 +218,15 @@ describe EM::P::Redis do
         end
         @c.receive_data "*3\r\n$3\r\nfoo\r\n$-1\r\n$3\r\nbar\r\n"
       end
+
+      describe "when the network output is buffered" do
+        it "should return the correct multi bulk reply" do
+          @c.send_request("GET mysortedlist") do |r|
+            r.should == ["foo", nil, "bar"]
+          end
+          "*3\r\n$3\r\nfoo\r\n$-1\r\n$3\r\nbar\r\n".each_byte { |byte| @c.receive_data(byte) }
+        end
+      end
     end
   end
 
