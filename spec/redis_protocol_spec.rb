@@ -9,6 +9,7 @@ module EM::P::Redis
   DOLLAR    = "$".freeze
   ASTERISK  = "*".freeze
   DELIMITER = "\r\n".freeze
+  BULK      = true.freeze
 
   def self.connect(options = {})
     host = options[:host] || 'localhost'
@@ -23,30 +24,33 @@ module EM::P::Redis
 
   def receive_data(reply)
     (@buffer ||= "") << reply
-    if index = @buffer.index(DELIMITER)
-      line = @buffer.slice(0, index + DELIMITER.size)
-      @request_cb.call process_reply(line)
+    while index = @buffer.index(DELIMITER)
+      line = @buffer.slice!(0, index + DELIMITER.size)
+      if DOLLAR == @prev_type
+        type = BULK
+        args = line[0..-3]
+      else
+        type = line[0]
+        args = line[1..-3]
+      end
+      case type
+      when PLUS, MINUS then 
+        @request_cb.call(args)
+      when COLON       then
+        @request_cb.call(args.to_i)
+      when DOLLAR      then
+        data_length = Integer(args)
+        if -1 == data_length
+          @request_cb.call(nil)
+        end
+      when BULK        then
+        @request_cb.call(args)
+      end
+      @prev_type = type
     end
   end
   
   private
-
-  def process_reply(line)
-    reply_type = line[0]
-    reply_args = line[1..-3]
-    process(reply_type, reply_args)
-  end
-
-  def process(type, args)
-    case type
-    when PLUS, MINUS then args
-    when COLON       then args.to_i
-    when DOLLAR      then
-      data_len = Integer(args)
-      nil if -1 == data_len
-    else type + args
-    end
-  end
 
   def format_as_multi_bulk_reply(line)
     words = line.split
@@ -133,6 +137,22 @@ describe EM::P::Redis do
           r.should be_nil
         end
         @c.receive_data "$-1\r\n"
+      end
+
+      it "should return a single binary safe string" do
+        @c.send_request("GET mykey") do |r|
+          r.should == "foobar"
+        end
+        @c.receive_data "$6\r\nfoobar\r\n"
+      end
+
+      describe "when network output is buffered" do
+        it "should return the correct bulk reply" do
+          @c.send_request("GET mykey") do |r|
+            r.should == "foobar"
+          end
+          "$6\r\nfoobar\r\n".each_byte { |byte| @c.receive_data(byte) }
+        end
       end
     end
   end
